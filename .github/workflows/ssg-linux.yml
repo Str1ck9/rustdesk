@@ -258,7 +258,9 @@ jobs:
           cmp AppDir/AppRun appimage-build/AppRun/v2.0.0/AppRun-Release-x86_64
           popd
           mkdir -p SignOutput
-          mv appimage/*.AppImage "SignOutput/$SSG_APP_NAME-$VERSION-x86_64.AppImage"
+          # appimage-builder runs as root, so its output is root-owned.
+          sudo mv appimage/*.AppImage "SignOutput/$SSG_APP_NAME-$VERSION-x86_64.AppImage"
+          sudo chown "$(id -u):$(id -g)" SignOutput/*.AppImage
           chmod +x SignOutput/*.AppImage
           sha256sum SignOutput/*.AppImage
 
