@@ -1,0 +1,282 @@
+name: SSG Remote Support - Linux
+
+# Branded Linux quick-support build for Strickland Services Group: an x86_64
+# AppImage only. It mirrors flutter-build.yml's build-rustdesk-linux and
+# build-appimage jobs. The .deb is only an intermediate: its package, binary and
+# systemd unit are still named "rustdesk", which does not match the
+# SSGRemoteSupport service name the installed mode expects, so it is not shipped.
+# An AppImage runs from a FUSE mount outside /usr, so the app treats it as not
+# installed (platform::linux::is_installed) and runs in quick-support mode.
+#
+# Required repository variable: SSG_RS_PUB_KEY (hbbs id_ed25519.pub)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "ssg-*"
+    # Push here to test the Linux build without tagging a release.
+    branches:
+      - ssg-linux-ci
+
+env:
+  RUST_VERSION: "1.75"
+  FLUTTER_VERSION: "3.24.5"
+  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+  VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+  VERSION: "1.5.1"
+  SSG_APP_NAME: "SSGRemoteSupport"
+  SSG_RS_PUB_KEY: "${{ vars.SSG_RS_PUB_KEY }}"
+
+jobs:
+  check-config:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require server public key
+        run: |
+          if [ "$(printf %s "$SSG_RS_PUB_KEY" | base64 -d 2>/dev/null | wc -c)" -ne 32 ]; then
+            echo "::error::Repository variable SSG_RS_PUB_KEY must be the hbbs id_ed25519.pub (base64, 32 bytes)."
+            exit 1
+          fi
+
+  generate-bridge:
+    needs: [check-config]
+    uses: ./.github/workflows/bridge.yml
+
+  build-linux:
+    name: build linux x86_64
+    needs: [generate-bridge]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Export GitHub Actions cache environment variables
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Maximize build space
+        run: |
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo apt-get update -y
+          sudo apt-get install -y nasm qemu-user-static
+
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Set Swap Space
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c # v1.0
+        with:
+          swap-size-gb: 12
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: x86_64-unknown-linux-gnu
+          components: "rustfmt"
+
+      - name: Save Rust toolchain version
+        run: |
+          RUST_TOOLCHAIN_VERSION=$(cargo --version | awk '{print $2}')
+          echo "RUST_TOOLCHAIN_VERSION=$RUST_TOOLCHAIN_VERSION" >> $GITHUB_ENV
+
+      - name: Disable rust bridge build
+        run: |
+          # only build cdylib
+          sed -i  "s/\[\"cdylib\", \"staticlib\", \"rlib\"\]/\[\"cdylib\"\]/g" Cargo.toml
+
+      - name: Setup vcpkg with Github Actions binary cache
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+        with:
+          vcpkgDirectory: /opt/artifacts/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Install vcpkg dependencies
+        run: |
+          sudo apt install -y libva-dev && apt show libva-dev
+          if ! $VCPKG_ROOT/vcpkg \
+            install \
+            --triplet x64-linux \
+            --x-install-root="$VCPKG_ROOT/installed"; then
+            find "${VCPKG_ROOT}/" -name "*.log" | while read -r _1; do
+              echo "$_1:"
+              echo "======"
+              cat "$_1"
+              echo "======"
+              echo ""
+            done
+            exit 1
+          fi
+        shell: bash
+
+      - name: Restore bridge files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - uses: rustdesk-org/run-on-arch-action@d3fcfbb632b84cf7f6bc772bfaaa2c2f4f8789a8 # no release tag; commit 2026-05-26
+        name: Build rustdesk
+        with:
+          arch: x86_64
+          distro: ubuntu18.04
+          githubToken: ${{ github.token }}
+          setup: |
+            ls -l "${PWD}"
+            ls -l /opt/artifacts/vcpkg/installed
+          # ssg_brand.rs reads the key with env!() at compile time, and cargo runs
+          # inside this container, so it has to be passed in explicitly.
+          dockerRunArgs: |
+            --volume "${PWD}:/workspace"
+            --volume "/opt/artifacts:/opt/artifacts"
+            --env SSG_RS_PUB_KEY=${{ vars.SSG_RS_PUB_KEY }}
+          shell: /bin/bash
+          install: |
+            apt-get update -y
+            apt-get install -y \
+               build-essential \
+               clang \
+               cmake \
+               curl \
+               gcc \
+               git \
+               g++ \
+               libayatana-appindicator3-dev \
+               libasound2-dev \
+               libclang-10-dev \
+               libgstreamer1.0-dev \
+               libgstreamer-plugins-base1.0-dev \
+               libgtk-3-dev \
+               libpulse-dev \
+               libva-dev \
+               libxcb-randr0-dev \
+               libxcb-shape0-dev \
+               libxcb-xfixes0-dev \
+               libxdo-dev \
+               libxfixes-dev \
+               llvm-10-dev \
+               nasm \
+               ninja-build \
+               pkg-config \
+               tree \
+               python3 \
+               unzip \
+               wget \
+               xz-utils \
+               libssl-dev
+            # we have libopus compiled by us.
+            apt-get remove -y libopus-dev || true
+          run: |
+            git config --global --add safe.directory "*"
+            test -n "$SSG_RS_PUB_KEY" || { echo "SSG_RS_PUB_KEY not passed into the container"; exit 1; }
+            # rust (no rustup, as upstream)
+            pushd /opt
+            wget -O rust.tar.gz https://static.rust-lang.org/dist/rust-${{env.RUST_TOOLCHAIN_VERSION}}-x86_64-unknown-linux-gnu.tar.gz
+            tar -zxvf rust.tar.gz > /dev/null && rm rust.tar.gz
+            cd rust-${{env.RUST_TOOLCHAIN_VERSION}}-x86_64-unknown-linux-gnu && ./install.sh
+            rm -rf rust-${{env.RUST_TOOLCHAIN_VERSION}}-x86_64-unknown-linux-gnu
+            mkdir -p ~/.cargo/
+            echo """
+              [source.crates-io]
+              registry = 'https://github.com/rust-lang/crates.io-index'
+            """ > ~/.cargo/config
+            pushd /workspace
+            export VCPKG_ROOT=/opt/artifacts/vcpkg
+            cargo build --locked --lib --features hwcodec,flutter,unix-file-copy-paste --release
+            rm -rf target/release/deps target/release/build
+            rm -rf ~/.cargo
+
+            # flutter
+            export PATH=/opt/flutter/bin:$PATH
+            pushd /opt
+            wget https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/flutter_linux_${{ env.FLUTTER_VERSION }}-stable.tar.xz
+            tar xf flutter_linux_${{ env.FLUTTER_VERSION }}-stable.tar.xz
+            flutter doctor -v
+            if [[ "3.24.5" == ${{ env.FLUTTER_VERSION }} ]]; then
+              pushd /opt/flutter
+              git apply /workspace/.github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff
+              popd
+            fi
+
+            pushd /workspace
+            export CARGO_INCREMENTAL=0
+            export DEB_ARCH=amd64
+            python3 ./build.py --flutter --skip-cargo
+            for name in rustdesk*??.deb; do
+              mv "$name" "${name%%.deb}-x86_64.deb"
+            done
+
+      - name: Upload deb
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-${{ env.VERSION }}-x86_64.deb
+          path: rustdesk-${{ env.VERSION }}-x86_64.deb
+          if-no-files-found: error
+
+  build-appimage:
+    name: Build appimage x86_64
+    needs: [build-linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          submodules: recursive
+
+      - name: Download deb
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: rustdesk-${{ env.VERSION }}-x86_64.deb
+          path: .
+
+      - name: Brand the AppImage recipe
+        run: |
+          mv rustdesk-${{ env.VERSION }}-x86_64.deb appimage/rustdesk.deb
+          # res/scalable.svg is still the RustDesk logo; the SSG PNG icons cover every size used.
+          sed -i '/scalable/d' appimage/AppImageBuilder-x86_64.yml
+          sed -i "s/^    name: rustdesk$/    name: $SSG_APP_NAME/" appimage/AppImageBuilder-x86_64.yml
+          grep -n "name: $SSG_APP_NAME" appimage/AppImageBuilder-x86_64.yml
+
+      - name: Build appimage package
+        shell: bash
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libarchive-tools libfuse2
+          sudo pip3 install "setuptools_scm<10"
+          sudo pip3 install git+https://github.com/rustdesk-org/appimage-builder.git
+          pushd appimage
+          ./build-apprun.sh x86_64
+          sudo appimage-builder --skip-tests --recipe ./AppImageBuilder-x86_64.yml
+          cmp AppDir/AppRun appimage-build/AppRun/v2.0.0/AppRun-Release-x86_64
+          popd
+          mkdir -p SignOutput
+          mv appimage/*.AppImage "SignOutput/$SSG_APP_NAME-$VERSION-x86_64.AppImage"
+          chmod +x SignOutput/*.AppImage
+          sha256sum SignOutput/*.AppImage
+
+      - name: Smoke test
+        run: |
+          ./SignOutput/*.AppImage --version
+
+      - name: Upload AppImage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ssg-remote-support-linux-x86_64
+          path: ./SignOutput
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/ssg-')
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        with:
+          prerelease: true
+          tag_name: ${{ github.ref_name }}
+          files: ./SignOutput/*.AppImage
