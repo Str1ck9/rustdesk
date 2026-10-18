@@ -6,6 +6,8 @@ use hbb_common::config;
 const APP_NAME: &str = "SSGRemoteSupport";
 const SERVER: &str = "help.stricklandservicesgroup.com";
 const API_SERVER: &str = "https://help.stricklandservicesgroup.com";
+// Read by the Flutter home page (desktop_home_page.dart).
+const HIDE_INSTALL_DAEMON_TIP: &str = "ssg-hide-install-daemon-tip";
 
 // The hbbs public key (id_ed25519.pub) comes from the build environment so it
 // can be rotated without a code change. Release builds refuse to compile
@@ -32,4 +34,11 @@ pub fn apply() {
     if !KEY.is_empty() {
         settings.insert(keys::OPTION_KEY.to_owned(), KEY.to_owned());
     }
+    drop(settings);
+    // SSG never ships the macOS start-on-boot daemon, so its install card is
+    // only noise for technicians and customers alike.
+    config::BUILTIN_SETTINGS
+        .write()
+        .unwrap()
+        .insert(HIDE_INSTALL_DAEMON_TIP.to_owned(), "Y".to_owned());
 }

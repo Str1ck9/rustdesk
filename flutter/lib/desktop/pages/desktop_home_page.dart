@@ -499,6 +499,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           watchIsInputMonitoring = true;
         }, help: 'Help', link: translate("doc_mac_permission"));
       } else if (!isOutgoingOnly &&
+          bind.mainGetBuildinOption(key: 'ssg-hide-install-daemon-tip') != 'Y' &&
           !svcStopped.value &&
           bind.mainIsInstalled() &&
           !bind.mainIsInstalledDaemon(prompt: false)) {
